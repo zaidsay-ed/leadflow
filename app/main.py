@@ -1,8 +1,11 @@
+import json
+
 from bson import ObjectId
 from fastapi import FastAPI, HTTPException, Query, Response
 from pymongo import ReturnDocument
 from pymongo.errors import DuplicateKeyError
 
+from app.cache import r, search_version, invalidate_search_cache
 from app.db import contacts, CASE_INSENSITIVE
 from app.models import ContactCreate, ContactUpdate
 
@@ -34,6 +37,7 @@ def create_contact(contact: ContactCreate):
     except DuplicateKeyError:
         raise HTTPException(status_code=409, detail="Contact with this email already exists")
     doc["_id"] = result.inserted_id
+    invalidate_search_cache()
     return serialize(doc)
 
 
@@ -44,6 +48,18 @@ def search_contacts(
     page: int = Query(1, ge=1),
     page_size: int = Query(20, ge=1, le=100),
 ):
+    # Lowercase the key parts so "Shopify" and "shopify" share one cache entry
+    key = (
+        f"search:v{search_version()}:"
+        f"{(company or '').lower()}:{(title or '').lower()}:{page}:{page_size}"
+    )
+
+    cached = r.get(key)
+    if cached:
+        result = json.loads(cached)
+        result["source"] = "cache"
+        return result
+
     filters = {}
     if company:
         filters["company"] = company
@@ -56,12 +72,16 @@ def search_contacts(
         .skip((page - 1) * page_size)
         .limit(page_size)
     )
-    return {
+    result = {
         "page": page,
         "page_size": page_size,
         "total": contacts.count_documents(filters, collation=CASE_INSENSITIVE),
         "results": [serialize(d) for d in cursor],
     }
+
+    r.set(key, json.dumps(result), ex=60)   # cache for 60 seconds
+    result["source"] = "database"
+    return result
 
 
 @app.get("/contacts/{contact_id}")
@@ -87,6 +107,7 @@ def update_contact(contact_id: str, update: ContactUpdate):
         raise HTTPException(status_code=409, detail="Email already in use")
     if not doc:
         raise HTTPException(status_code=404, detail="Contact not found")
+    invalidate_search_cache()
     return serialize(doc)
 
 
@@ -95,4 +116,5 @@ def delete_contact(contact_id: str):
     result = contacts.delete_one({"_id": to_object_id(contact_id)})
     if result.deleted_count == 0:
         raise HTTPException(status_code=404, detail="Contact not found")
+    invalidate_search_cache()
     return Response(status_code=204)
