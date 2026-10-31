@@ -3,7 +3,7 @@ from fastapi import FastAPI, HTTPException, Query, Response
 from pymongo import ReturnDocument
 from pymongo.errors import DuplicateKeyError
 
-from app.db import contacts
+from app.db import contacts, CASE_INSENSITIVE
 from app.models import ContactCreate, ContactUpdate
 
 app = FastAPI(title="LeadFlow")
@@ -50,11 +50,16 @@ def search_contacts(
     if title:
         filters["title"] = title
 
-    cursor = contacts.find(filters).skip((page - 1) * page_size).limit(page_size)
+    cursor = (
+        contacts.find(filters)
+        .collation(CASE_INSENSITIVE)
+        .skip((page - 1) * page_size)
+        .limit(page_size)
+    )
     return {
         "page": page,
         "page_size": page_size,
-        "total": contacts.count_documents(filters),
+        "total": contacts.count_documents(filters, collation=CASE_INSENSITIVE),
         "results": [serialize(d) for d in cursor],
     }
 
