@@ -1,16 +1,17 @@
 import json
 
 from bson import ObjectId
-from fastapi import FastAPI, HTTPException, Query, Response
+from fastapi import Depends, FastAPI, HTTPException, Query, Response
 from pymongo import ReturnDocument
 from pymongo.errors import DuplicateKeyError
 
 from app.cache import r, search_version, invalidate_search_cache
 from app.db import contacts, CASE_INSENSITIVE
 from app.models import ContactCreate, ContactUpdate
+from app.rate_limit import rate_limit
 
-app = FastAPI(title="LeadFlow")
 
+app = FastAPI(title="LeadFlow", dependencies=[Depends(rate_limit)])
 
 def serialize(doc: dict) -> dict:
     """Convert Mongo's _id (ObjectId) into a plain string id."""
