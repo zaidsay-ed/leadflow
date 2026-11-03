@@ -6,6 +6,17 @@ services:
     environment:
       MONGO_URL: mongodb://mongo:27017
       REDIS_URL: redis://redis:6379
+      RATE_LIMIT: "30"
+    depends_on:
+      - mongo
+      - redis
+
+  worker:
+    build: .
+    command: rq worker --with-scheduler --url redis://redis:6379 enrichment
+    environment:
+      MONGO_URL: mongodb://mongo:27017
+      REDIS_URL: redis://redis:6379
     depends_on:
       - mongo
       - redis

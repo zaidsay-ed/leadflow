@@ -9,7 +9,11 @@ from app.cache import r, search_version, invalidate_search_cache
 from app.db import contacts, CASE_INSENSITIVE
 from app.models import ContactCreate, ContactUpdate
 from app.rate_limit import rate_limit
+from app.queue import enrichment_queue, redis_conn
 
+from rq import Retry
+from rq.exceptions import NoSuchJobError
+from rq.job import Job
 
 app = FastAPI(title="LeadFlow", dependencies=[Depends(rate_limit)])
 
@@ -119,3 +123,39 @@ def delete_contact(contact_id: str):
         raise HTTPException(status_code=404, detail="Contact not found")
     invalidate_search_cache()
     return Response(status_code=204)
+
+
+@app.post("/contacts/{contact_id}/enrich", status_code=202)
+def enrich_contact(contact_id: str):
+    oid = to_object_id(contact_id)
+
+    # Atomically mark as queued, but only if it isn't already queued or processing.
+    # One database operation means two simultaneous requests can't both get through.
+    doc = contacts.find_one_and_update(
+        {"_id": oid, "enrichment_status": {"$nin": ["queued", "processing"]}},
+        {"$set": {"enrichment_status": "queued"}},
+    )
+    if not doc:
+        if contacts.count_documents({"_id": oid}) == 0:
+            raise HTTPException(status_code=404, detail="Contact not found")
+        raise HTTPException(status_code=409, detail="Enrichment already in progress")
+
+    job = enrichment_queue.enqueue(
+        "app.jobs.enrich_contact",
+        contact_id,
+        retry=Retry(max=3, interval=[5, 10, 20]),   # retry up to 3 times, waiting longer each time
+    )
+    return {"job_id": job.id, "status": "queued"}
+
+
+@app.get("/jobs/{job_id}")
+def get_job(job_id: str):
+    try:
+        job = Job.fetch(job_id, connection=redis_conn)
+    except NoSuchJobError:
+        raise HTTPException(status_code=404, detail="Job not found")
+    return {
+        "job_id": job.id,
+        "status": job.get_status(),
+        "result": job.return_value(),
+    }
