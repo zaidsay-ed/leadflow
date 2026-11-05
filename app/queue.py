@@ -7,3 +7,4 @@ from rq import Queue
 redis_conn = Redis.from_url(os.getenv("REDIS_URL", "redis://localhost:6379"))
 
 enrichment_queue = Queue("enrichment", connection=redis_conn)
+sequence_queue = Queue("sequences", connection=redis_conn)

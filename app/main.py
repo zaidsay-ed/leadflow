@@ -6,8 +6,9 @@ from pymongo import ReturnDocument
 from pymongo.errors import DuplicateKeyError
 
 from app.cache import r, search_version, invalidate_search_cache
-from app.db import contacts, CASE_INSENSITIVE
-from app.models import ContactCreate, ContactUpdate
+from app.db import contacts, sequences, enrollments, sends, CASE_INSENSITIVE
+from app.models import ContactCreate, ContactUpdate, SequenceCreate, EnrollRequest
+from app.timing import now, due_at
 from app.rate_limit import rate_limit
 from app.queue import enrichment_queue, redis_conn
 
@@ -27,6 +28,19 @@ def to_object_id(contact_id: str) -> ObjectId:
     if not ObjectId.is_valid(contact_id):
         raise HTTPException(status_code=404, detail="Contact not found")
     return ObjectId(contact_id)
+
+
+def enrollment_view(doc: dict) -> dict:
+    sent = sends.find({"enrollment_id": doc["_id"]}).sort("step_index", 1)
+    return {
+        "id": str(doc["_id"]),
+        "sequence_id": str(doc["sequence_id"]),
+        "contact_id": str(doc["contact_id"]),
+        "status": doc["status"],
+        "current_step": doc["current_step"],
+        "next_run_at": doc.get("next_run_at"),
+        "sent": [{"step": s["step_index"] + 1, "sent_at": s["sent_at"]} for s in sent],
+    }
 
 
 @app.get("/")
@@ -159,3 +173,62 @@ def get_job(job_id: str):
         "status": job.get_status(),
         "result": job.return_value(),
     }
+
+
+@app.post("/sequences", status_code=201)
+def create_sequence(seq: SequenceCreate):
+    doc = seq.model_dump()
+    doc["created_at"] = now()
+    doc["_id"] = sequences.insert_one(doc).inserted_id
+    return serialize(doc)
+
+
+@app.get("/sequences/{sequence_id}")
+def get_sequence(sequence_id: str):
+    doc = sequences.find_one({"_id": to_object_id(sequence_id)})
+    if not doc:
+        raise HTTPException(status_code=404, detail="Sequence not found")
+    return serialize(doc)
+
+
+@app.post("/sequences/{sequence_id}/enroll", status_code=201)
+def enroll_contact(sequence_id: str, req: EnrollRequest):
+    seq = sequences.find_one({"_id": to_object_id(sequence_id)})
+    if not seq:
+        raise HTTPException(status_code=404, detail="Sequence not found")
+    contact = contacts.find_one({"_id": to_object_id(req.contact_id)})
+    if not contact:
+        raise HTTPException(status_code=404, detail="Contact not found")
+
+    start = now()
+    doc = {
+        "sequence_id": seq["_id"],
+        "contact_id": contact["_id"],
+        "status": "active",
+        "current_step": 0,
+        "enrolled_at": start,
+        "next_run_at": due_at(start, seq["steps"][0]["day"]),
+    }
+    try:
+        doc["_id"] = enrollments.insert_one(doc).inserted_id
+    except DuplicateKeyError:
+        raise HTTPException(status_code=409, detail="Contact already enrolled in this sequence")
+    return enrollment_view(doc)
+
+
+@app.get("/enrollments/{enrollment_id}")
+def get_enrollment(enrollment_id: str):
+    doc = enrollments.find_one({"_id": to_object_id(enrollment_id)})
+    if not doc:
+        raise HTTPException(status_code=404, detail="Enrollment not found")
+    return enrollment_view(doc)
+
+
+@app.post("/contacts/{contact_id}/reply")
+def contact_replied(contact_id: str):
+    """Simulate a reply: stop every active sequence for this contact."""
+    result = enrollments.update_many(
+        {"contact_id": to_object_id(contact_id), "status": "active"},
+        {"$set": {"status": "replied", "next_run_at": None}},
+    )
+    return {"stopped_enrollments": result.modified_count}

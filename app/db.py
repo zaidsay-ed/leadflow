@@ -2,7 +2,7 @@ import os
 from pymongo import MongoClient, ASCENDING
 from pymongo.collation import Collation
 
-client = MongoClient(os.getenv("MONGO_URL", "mongodb://localhost:27017"))
+client = MongoClient(os.getenv("MONGO_URL", "mongodb://localhost:27017"), tz_aware=True)
 db = client["leadflow"]
 contacts = db["contacts"]
 
@@ -20,3 +20,14 @@ contacts.create_index(
     collation=CASE_INSENSITIVE,
     name="company_title_ci",
 )
+
+sequences = db["sequences"]
+enrollments = db["enrollments"]
+sends = db["sends"]
+
+# A contact can only be enrolled once per sequence
+enrollments.create_index([("sequence_id", ASCENDING), ("contact_id", ASCENDING)], unique=True)
+# The scheduler's query: "active enrollments that are due"
+enrollments.create_index([("status", ASCENDING), ("next_run_at", ASCENDING)])
+# Idempotency: each step of each enrollment can be recorded only once
+sends.create_index([("enrollment_id", ASCENDING), ("step_index", ASCENDING)], unique=True)

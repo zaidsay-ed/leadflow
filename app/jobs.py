@@ -4,6 +4,9 @@ import time
 from bson import ObjectId
 from rq import get_current_job
 
+from pymongo.errors import DuplicateKeyError
+from app.db import contacts, enrollments, sequences, sends
+from app.timing import now, due_at
 from app.cache import invalidate_search_cache
 from app.db import contacts
 
@@ -52,3 +55,52 @@ def enrich_contact(contact_id: str) -> str:
         if job and not job.retries_left:  # last attempt failed → give up
             contacts.update_one({"_id": _id}, {"$set": {"enrichment_status": "failed"}})
         raise   # re-raise so RQ knows it failed (and retries if attempts are left)
+
+
+def render(template: str, contact: dict) -> str:
+    first_name = contact["name"].split()[0]
+    return (template
+            .replace("{{first_name}}", first_name)
+            .replace("{{company}}", contact.get("company") or "your company"))
+
+
+def send_step(enrollment_id: str, step_index: int) -> str:
+    eid = ObjectId(enrollment_id)
+    enrollment = enrollments.find_one({"_id": eid})
+
+    # Stop if they replied, or if this job is outdated
+    if not enrollment or enrollment["status"] != "active":
+        return "skipped: not active"
+    if enrollment["current_step"] != step_index:
+        return "skipped: step already done"
+
+    seq = sequences.find_one({"_id": enrollment["sequence_id"]})
+    contact = contacts.find_one({"_id": enrollment["contact_id"]})
+    step = seq["steps"][step_index]
+
+    # Record the send first. The unique index guarantees a step is sent at most once,
+    # even if this job runs twice.
+    try:
+        sends.insert_one({"enrollment_id": eid, "step_index": step_index, "sent_at": now()})
+        already_sent = False
+    except DuplicateKeyError:
+        already_sent = True
+
+    if not already_sent:
+        # Simulated send. A real system would call an email provider here.
+        print(f"[SEND] to={contact['email']} step={step_index + 1}/{len(seq['steps'])} "
+              f"subject={render(step['subject'], contact)!r}", flush=True)
+
+    # Move to the next step (or finish). The filter makes this safe to run twice.
+    next_index = step_index + 1
+    if next_index < len(seq["steps"]):
+        update = {"current_step": next_index,
+                  "next_run_at": due_at(enrollment["enrolled_at"], seq["steps"][next_index]["day"])}
+    else:
+        update = {"current_step": next_index, "status": "completed", "next_run_at": None}
+
+    enrollments.update_one(
+        {"_id": eid, "status": "active", "current_step": step_index},
+        {"$set": update},
+    )
+    return "already sent" if already_sent else "sent"
