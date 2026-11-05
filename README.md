@@ -18,7 +18,7 @@ docker compose up --build
 Then open http://localhost:8000/docs
 
 ## Roadmap
-- [ ] Redis caching for search
-- [ ] Rate limiting
-- [ ] Background enrichment jobs
-- [ ] Multi-step outreach sequences
+- [X] Redis caching for search
+- [X] Rate limiting
+- [X] Background enrichment jobs
+- [X] Multi-step outreach sequences
